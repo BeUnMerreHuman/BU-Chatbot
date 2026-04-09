@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 import jwt
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import httpx
 
-# LangChain imports for history formatting
+# LangChain imports 
 from langchain_core.messages import HumanMessage, AIMessage
 
 # Configure logging
@@ -30,8 +31,7 @@ load_dotenv()
 from RAGengine import RuleSearchEngine
 from database import ChatDatabase  
 
-# --- INITIALIZE SERVICES ---
-# The engine is stateless, so multiple users can use it simultaneously. 
+# --- INITIALIZE SERVICES --- 
 db_service = ChatDatabase()
 engine = RuleSearchEngine(db=db_service.db)
 
@@ -40,35 +40,27 @@ CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL")
 CLERK_ISSUER = os.getenv("CLERK_ISSUER")  
 
 class JWKSCache:
-    """
-    Async-friendly cache manager for Clerk JWKS keys.
-    Handles caching, rotation, and rate-limiting for key fetches.
-    """
+    
     def __init__(self, jwks_url: str):
         self.jwks_url = jwks_url
         self.keys = {}
         self.last_refresh = 0
-        self.min_refresh_interval = 10  # Seconds to wait between refreshes to prevent spam
+        self._refresh_lock = asyncio.Lock()
+        self.min_refresh_interval = 10  
 
     async def get_key(self, kid: str):
-        """Retrieve a key by ID. Refreshes cache if key is missing."""
-        # 1. Optimistic check
+       
         if kid in self.keys:
             return self.keys[kid]
-        
-        # 2. Key missing? Try to refresh
         await self.refresh_keys()
-        
-        # 3. Return key (or None if still missing)
         return self.keys.get(kid)
 
     async def refresh_keys(self):
-        """Fetch fresh keys from Clerk JWKS endpoint."""
-        current_time = time.time()
-        
-        # Prevent hammering the JWKS endpoint if multiple requests fail simultaneously
-        if current_time - self.last_refresh < self.min_refresh_interval:
-            return
+        async with self._refresh_lock:
+            current_time = time.time()
+            if current_time - self.last_refresh < self.min_refresh_interval:
+                logger.warning("Skipping JWKS refresh due to rate limiting.")
+                return
 
         try:
             async with httpx.AsyncClient() as client:
@@ -87,41 +79,34 @@ class JWKSCache:
                 logger.info(f"Successfully refreshed {len(self.keys)} Clerk public keys")
         except Exception as e:
             logger.error(f"Failed to fetch Clerk public keys: {str(e)}")
-            # We don't raise here to allow the caller to handle the specific 'key not found' error
 
-# Initialize the cache manager
 jwks_cache = JWKSCache(CLERK_JWKS_URL)
 
 
-# --- LIFESPAN HANDLER (Replaces on_event) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan context manager for startup and shutdown events.
-    """
+ 
     logger.info("Starting up application...")
-
-    # 1. Initialize DB Indexes (CRITICAL for thread safety)
     await db_service.ensure_indexes()
-
-    # 2. Warm up Clerk Keys Cache
-    await jwks_cache.refresh_keys()
-    
+    await jwks_cache.refresh_keys()   
     yield
     
-    # Shutdown logic
     logger.info("Shutting down application...")
-    db_service.close()
+
+    try:
+        db_service.close()  
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 # --- APP DEFINITION ---
 app = FastAPI(title="BU Chatbot API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace "*" with your specific domain(s) for tighter security
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "").split(","),  
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type"], # Explicitly allows Clerk's auth header
+    allow_headers=["Authorization", "Content-Type"], 
 )
 
 templates = Jinja2Templates(directory="static")
@@ -142,23 +127,18 @@ async def get_current_user_id(authorization: str = Header(None)) -> str:
         raise HTTPException(status_code=401, detail="Authorization header missing")
     
     try:
-        # Extract token from Bearer scheme
         token = authorization.replace("Bearer ", "")
-        
-        # Decode header to get kid (key ID)
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
         
         if not kid:
             raise HTTPException(status_code=401, detail="Invalid token: no key ID")
         
-        # Get the public key using the cache manager
         public_key = await jwks_cache.get_key(kid)
             
         if not public_key:
             raise HTTPException(status_code=401, detail="Invalid token: unknown key ID or key rotation occurred")
         
-        # Verify and decode the token
         decoded = jwt.decode(
             token,
             public_key,
@@ -192,9 +172,7 @@ async def get_current_user_id(authorization: str = Header(None)) -> str:
 
 # --- HELPER FUNCTIONS ---
 async def get_formatted_history(session_id: str, user_id: str):
-    """
-    Fetches history from MongoDB asynchronously
-    """
+    
     if not session_id:
         return []
         
@@ -223,10 +201,8 @@ async def root(request: Request):
 async def chat(msg: ChatMessage, user_id: str = Depends(get_current_user_id)):
     session_id = msg.session_id
 
-    # 1. Handle New Sessions
     if not session_id or not await db_service.get_session(session_id, user_id):
         session_id = str(uuid.uuid4())
-        # Generate title
         try:
             title = await engine.generate_chat_title(msg.message)
         except Exception as e:
@@ -235,17 +211,14 @@ async def chat(msg: ChatMessage, user_id: str = Depends(get_current_user_id)):
             
         await db_service.create_session(session_id, title, user_id)
     
-    # 2. Retrieve History from DB 
     history_chain = await get_formatted_history(session_id, user_id)
 
-    # 3. Get AI Response
     try:
         response = await engine.ask(
             msg.message, 
             chat_history=history_chain
         )
         
-        # 4. Save new interaction to MongoDB
         await db_service.add_message(session_id, user_id, "user", msg.message)
         await db_service.add_message(session_id, user_id, "assistant", response)
         
@@ -277,16 +250,13 @@ async def get_chats(user_id: str = Depends(get_current_user_id)):
 
 @app.get("/api/chats/{session_id}")
 async def get_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
-    """Get a specific chat session with history"""
     try:
         session = await db_service.get_session(session_id, user_id)
         if not session:
             raise HTTPException(status_code=404, detail="Chat not found")
         
-        # Retrieve full history from MongoDB
         history_messages = await db_service.get_chat_history(session_id, user_id)
         
-        # Format for frontend response
         formatted_messages = []
         for msg in history_messages:
             formatted_messages.append({
@@ -312,7 +282,6 @@ async def get_chat(session_id: str, user_id: str = Depends(get_current_user_id))
 
 @app.delete("/api/chats/{session_id}")
 async def delete_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
-    """Delete a chat session"""
     try:
         if not await db_service.get_session(session_id, user_id):
             raise HTTPException(status_code=404, detail="Chat not found")
@@ -329,9 +298,9 @@ async def delete_chat(session_id: str, user_id: str = Depends(get_current_user_i
             detail="Failed to delete chat session. Please try again later."
         )
 
-# Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=80)
+    
