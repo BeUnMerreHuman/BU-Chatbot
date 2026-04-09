@@ -26,13 +26,16 @@ class RuleSearchEngine:
         """
         self.verbose = verbose
         self.db = db
-        self.collection = self.db["rules"] # Reuses the Motor collection
+        self.collection = self.db["rules"] 
         
-        # Load Embedding Model (CPU bound, stays sync)
         if self.verbose: print("Loading embedding model...")
+        cache_path = os.path.join(os.path.dirname(__file__), "model_cache")
+        self.embedding_model = TextEmbedding(
+            model_name=MODEL_NAME, 
+            cache_dir=cache_path
+        )
         self.embedding_model = TextEmbedding(model_name=MODEL_NAME)
 
-        # Initialize Groq LLM
         if self.verbose: print("Initializing Groq...")
         self.llm = ChatGroq(
             temperature=0, 
@@ -43,7 +46,6 @@ class RuleSearchEngine:
     async def search(self, query: str, limit: int = 3):
         """Async Search using Motor"""
         
-        # A. Regex Search (Async)
         rule_match = re.search(r"rule\s+([\d\.]+)", query, re.IGNORECASE)
         if rule_match:
             target_rule = rule_match.group(1)
@@ -53,15 +55,12 @@ class RuleSearchEngine:
             })
             return await cursor.to_list(length=None)
 
-        # B. Page Search (Async)
         page_match = re.search(r"page\s+(\d+)", query, re.IGNORECASE)
         if page_match:
             target_page = int(page_match.group(1))
             cursor = self.collection.find({"metadata.page_number": target_page})
             return await cursor.to_list(length=None)
 
-        # C. Vector Search
-        # Embeddings are CPU bound, so we run them in a thread to avoid blocking the loop
         query_vector = await asyncio.to_thread(self._embed_query, query)
         
         pipeline = [
@@ -84,7 +83,6 @@ class RuleSearchEngine:
             }
         ]
         
-        # Motor aggregate (Async)
         try:
             cursor = self.collection.aggregate(pipeline)
             return await cursor.to_list(length=None)
@@ -98,16 +96,6 @@ class RuleSearchEngine:
         return list(generator)[0].tolist()
 
     async def contextualize_query(self, user_input: str, chat_history: list):
-        """
-        Uses LLM to rewrite the user query based on chat history.
-        
-        Args:
-            user_input (str): The user's question
-            chat_history (list): List of HumanMessage/AIMessage objects
-            
-        Returns:
-            str: Contextualized standalone question
-        """
         if not chat_history:
             return user_input
 
@@ -118,7 +106,6 @@ class RuleSearchEngine:
             "without the chat history. Do NOT answer the question, "
             "just reformulate it if needed and otherwise return it as is."
         )
-
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", contextualize_q_system_prompt),
@@ -128,24 +115,13 @@ class RuleSearchEngine:
 
         chain = prompt | self.llm | StrOutputParser()
         
-        # Use ainvoke for Async LLM call
         return await chain.ainvoke({
             "chat_history": chat_history,
             "input": user_input
         })
 
     async def generate_answer(self, user_query: str, documents: list, chat_history: list):
-        """
-        Generates the final answer using Groq + Retrieved Documents
-        
-        Args:
-            user_query (str): The user's question
-            documents (list): Retrieved documents from search
-            chat_history (list): List of HumanMessage/AIMessage objects
-            
-        Returns:
-            tuple: (answer, context_text)
-        """
+    
         context_text = ""
         if not documents:
             context_text = "No specific rules found in the database."
@@ -161,7 +137,7 @@ class RuleSearchEngine:
             "You are an assistant for question-answering tasks. "
             "Use the following pieces of retrieved context to answer "
             "the question. If you don't know the answer, say that you "
-            "don't know. "
+            "don't know. Dont answer questions that are not related to the context. Always use the provided context to answer and do not rely on any prior knowledge."
             "ALWAYS cite the specific Rule Number or Page Number associated "
             "with the information in your answer.\n\n"
             "CONTEXT:\n{context}"
@@ -175,7 +151,6 @@ class RuleSearchEngine:
 
         chain = prompt | self.llm | StrOutputParser()
 
-        # Use ainvoke for Async LLM call
         response = await chain.ainvoke({
             "chat_history": chat_history,
             "context": context_text,
@@ -185,37 +160,17 @@ class RuleSearchEngine:
         return response, context_text
 
     async def ask(self, user_input: str, chat_history: list = None):
-        """
-        Main method to ask a question and get an answer.
-        Handles contextualization, search, and answer generation.
-        Now STATELESS - caller manages chat history.
-        
-        Args:
-            user_input (str): The user's question
-            chat_history (list): List of HumanMessage/AIMessage objects (optional)
-            
-        Returns:
-            str: The AI's answer
-        """
+      
         if chat_history is None:
             chat_history = []
         
-        # 1. Contextualize (Async)
         standalone_query = await self.contextualize_query(user_input, chat_history)
-        
-        # 2. Retrieve Data (Async)
         docs = await self.search(standalone_query)
-        
-        # 3. Generate Answer (Async)
         answer, _ = await self.generate_answer(user_input, docs, chat_history)
         
         return answer
     
     async def generate_chat_title(self, first_message: str):
-        """
-        Generates a short, concise title (3-5 words) for the chat session
-        based on the user's first message.
-        """
         title_system_prompt = (
             "You are a helpful assistant. Generate a very short, concise "
             "title (maximum 5 words) for a chat session that starts with "
