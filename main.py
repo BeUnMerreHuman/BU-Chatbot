@@ -4,16 +4,14 @@ import uuid
 import jwt
 import logging
 import time  
+import json
 from typing import Optional
 from contextlib import asynccontextmanager 
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request  
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
@@ -40,7 +38,6 @@ CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL")
 CLERK_ISSUER = os.getenv("CLERK_ISSUER")  
 
 class JWKSCache:
-    
     def __init__(self, jwks_url: str):
         self.jwks_url = jwks_url
         self.keys = {}
@@ -49,7 +46,6 @@ class JWKSCache:
         self.min_refresh_interval = 10  
 
     async def get_key(self, kid: str):
-       
         if kid in self.keys:
             return self.keys[kid]
         await self.refresh_keys()
@@ -82,17 +78,14 @@ class JWKSCache:
 
 jwks_cache = JWKSCache(CLERK_JWKS_URL)
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
- 
     logger.info("Starting up application...")
     await db_service.ensure_indexes()
     await jwks_cache.refresh_keys()   
     yield
     
     logger.info("Shutting down application...")
-
     try:
         db_service.close()  
     except Exception as e:
@@ -109,70 +102,42 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"], 
 )
 
-templates = Jinja2Templates(directory="static")
-
-# --- API MODELS ---
-class ChatMessage(BaseModel):
-    message: str = Field(..., min_length=1, max_length=2000, description="User query text")
-    session_id: Optional[str] = None
-
-class ChatResponse(BaseModel):
-    response: str
-    session_id: str
-
 # --- AUTHENTICATION ---
+async def verify_clerk_token(token: str) -> str:
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get("kid")
+        if not kid:
+            raise ValueError("Invalid token: no key ID")
+        
+        public_key = await jwks_cache.get_key(kid)
+        if not public_key:
+            raise ValueError("Invalid token: unknown key ID")
+        
+        decoded = jwt.decode(
+            token, public_key, algorithms=["RS256"], issuer=CLERK_ISSUER,
+            options={"verify_signature": True, "verify_exp": True, "verify_iss": True, "require": ["exp", "iss", "sub"]},
+            leeway=10
+        )
+        return decoded.get("sub")
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
+        return None
+
 async def get_current_user_id(authorization: str = Header(None)) -> str:
-    """Extract user_id from Clerk JWT token with signature verification"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header missing")
     
-    try:
-        token = authorization.replace("Bearer ", "")
-        unverified_header = jwt.get_unverified_header(token)
-        kid = unverified_header.get("kid")
-        
-        if not kid:
-            raise HTTPException(status_code=401, detail="Invalid token: no key ID")
-        
-        public_key = await jwks_cache.get_key(kid)
-            
-        if not public_key:
-            raise HTTPException(status_code=401, detail="Invalid token: unknown key ID or key rotation occurred")
-        
-        decoded = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            issuer=CLERK_ISSUER,
-            options={
-                "verify_signature": True,
-                "verify_exp": True,
-                "verify_iss": True,
-                "require": ["exp", "iss", "sub"]
-            }
-        )
-        
-        user_id = decoded.get("sub")
-        
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token: no user ID")
-        
-        return user_id
-        
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.InvalidIssuerError:
-        raise HTTPException(status_code=401, detail="Invalid token issuer")
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid token: {str(e)}")
-        raise HTTPException(status_code=401, detail="Invalid token")
-    except Exception as e:
-        logger.error(f"Authentication error: {str(e)}")
+    token = authorization.replace("Bearer ", "")
+    user_id = await verify_clerk_token(token)
+    
+    if not user_id:
         raise HTTPException(status_code=401, detail="Authentication failed")
+        
+    return user_id
 
 # --- HELPER FUNCTIONS ---
 async def get_formatted_history(session_id: str, user_id: str):
-    
     if not session_id:
         return []
         
@@ -187,66 +152,93 @@ async def get_formatted_history(session_id: str, user_id: str):
             
     return formatted_history
 
-# --- API ENDPOINTS ---
-
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    clerk_key = os.getenv("CLERK_PUBLISHABLE_KEY")
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "clerk_publishable_key": clerk_key
-    })
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(msg: ChatMessage, user_id: str = Depends(get_current_user_id)):
-    session_id = msg.session_id
-
-    if not session_id or not await db_service.get_session(session_id, user_id):
-        session_id = str(uuid.uuid4())
-        try:
-            title = await engine.generate_chat_title(msg.message)
-        except Exception as e:
-            logger.warning(f"Failed to generate chat title: {str(e)}")
-            title = msg.message[:30] + "..."
-            
-        await db_service.create_session(session_id, title, user_id)
+# --- WEBSOCKET ENDPOINT ---
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket, token: str = Query(...), session_id: Optional[str] = Query(None)):
+    await websocket.accept()
     
-    history_chain = await get_formatted_history(session_id, user_id)
+    user_id = await verify_clerk_token(token)
+    if not user_id:
+        await websocket.send_text("Error: Unauthorized")
+        await websocket.close(code=1008)
+        return
 
     try:
-        response = await engine.ask(
-            msg.message, 
-            chat_history=history_chain
-        )
-        
-        await db_service.add_message(session_id, user_id, "user", msg.message)
-        await db_service.add_message(session_id, user_id, "assistant", response)
-        
-        return ChatResponse(response=response, session_id=session_id)
-        
+        while True:
+            # 2. Wait for user message (expecting JSON payload now)
+            raw_data = await websocket.receive_text()
+            try:
+                payload = json.loads(raw_data)
+                user_message = payload.get("content", "")
+                user_msg_id = payload.get("id", str(uuid.uuid4()))
+                assistant_msg_id = payload.get("assistant_id", str(uuid.uuid4()))
+            except json.JSONDecodeError:
+                user_message = raw_data
+                user_msg_id = str(uuid.uuid4())
+                assistant_msg_id = str(uuid.uuid4())
+            
+            # 3. Handle Session
+            current_session = session_id
+            session_data = await db_service.get_session(current_session, user_id) if current_session else None
+            
+            if not session_data:
+                current_session = str(uuid.uuid4())
+                try:
+                    title = await engine.generate_chat_title(user_message)
+                except Exception as e:
+                    logger.warning(f"Failed to generate chat title: {str(e)}")
+                    title = user_message[:30] + "..."
+                    
+                await db_service.create_session(current_session, title, user_id)
+            elif session_data.get("title") == "New Chat":
+                try:
+                    new_title = await engine.generate_chat_title(user_message)
+                    await db_service.update_session_title(current_session, user_id, new_title)
+                except Exception as e:
+                    logger.warning(f"Failed to update chat title: {str(e)}")
+            
+            # 4. Stream Response
+            history_chain = await get_formatted_history(current_session, user_id)
+            full_response = ""
+            
+            async for chunk in engine.ask_stream(user_message, history_chain):
+                await websocket.send_text(chunk)
+                full_response += chunk
+                
+            await websocket.send_text("[END]")
+            
+            # 5. Save to DB post-stream with designated IDs
+            await db_service.add_message(current_session, user_id, "user", user_message, user_msg_id)
+            await db_service.add_message(current_session, user_id, "assistant", full_response, assistant_msg_id)
+            
+    except WebSocketDisconnect:
+        logger.info(f"User {user_id} disconnected from WebSocket")
     except Exception as e:
-        logger.error(f"Error generating response for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail="An error occurred while processing your request. Please try again later."
-        )
+        logger.error(f"WebSocket error: {str(e)}")
+        await websocket.send_text("[END]")
+        await websocket.close()
+
+# --- REST API ENDPOINTS ---
+class PinUpdate(BaseModel):
+    is_pinned: bool
+
+class FeedbackUpdate(BaseModel):
+    feedback: str
 
 @app.post("/api/new-chat")
 async def new_chat(user_id: str = Depends(get_current_user_id)):
-    """Start a new chat session"""
-    return {"status": "ok", "message": "New chat started"}
+    session_id = str(uuid.uuid4())
+    title = "New Chat"
+    await db_service.create_session(session_id, title, user_id)
+    return {"id": session_id, "title": title}
 
 @app.get("/api/chats")
 async def get_chats(user_id: str = Depends(get_current_user_id)):
-    """Get all chat sessions for the current user"""
     try:
         return {"chats": await db_service.list_sessions(user_id)}
     except Exception as e:
         logger.error(f"Error fetching chats for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve chat sessions. Please try again later."
-        )
+        raise HTTPException(status_code=500, detail="Failed to retrieve chat sessions.")
 
 @app.get("/api/chats/{session_id}")
 async def get_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
@@ -260,9 +252,11 @@ async def get_chat(session_id: str, user_id: str = Depends(get_current_user_id))
         formatted_messages = []
         for msg in history_messages:
             formatted_messages.append({
-                "role": msg["role"],
-                "content": msg["content"],
-                "timestamp": msg["timestamp"].isoformat()
+                "role": msg.get("role"),
+                "content": msg.get("content"),
+                "timestamp": msg.get("timestamp").isoformat() if msg.get("timestamp") else None,
+                "id": msg.get("id"),
+                "feedback": msg.get("feedback", "none")
             })
         
         return {
@@ -275,10 +269,31 @@ async def get_chat(session_id: str, user_id: str = Depends(get_current_user_id))
         raise
     except Exception as e:
         logger.error(f"Error fetching chat {session_id} for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve chat session. Please try again later."
-        )
+        raise HTTPException(status_code=500, detail="Failed to retrieve chat session.")
+
+@app.patch("/api/chats/{session_id}/pin")
+async def pin_chat(session_id: str, payload: PinUpdate, user_id: str = Depends(get_current_user_id)):
+    """Toggle the pin status of a specific chat."""
+    try:
+        await db_service.toggle_pin(session_id, user_id, payload.is_pinned)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error pinning chat: {e}")
+        raise HTTPException(status_code=500, detail="Failed to pin chat.")
+
+@app.patch("/api/chats/{session_id}/messages/{message_id}/feedback")
+async def update_feedback(session_id: str, message_id: str, payload: FeedbackUpdate, user_id: str = Depends(get_current_user_id)):
+    """Update feedback (likes/dislikes) for a specific message."""
+    try:
+        success = await db_service.update_message_feedback(session_id, user_id, message_id, payload.feedback)
+        if not success:
+            raise HTTPException(status_code=404, detail="Message not found")
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating feedback: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update feedback.")
 
 @app.delete("/api/chats/{session_id}")
 async def delete_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
@@ -287,20 +302,13 @@ async def delete_chat(session_id: str, user_id: str = Depends(get_current_user_i
             raise HTTPException(status_code=404, detail="Chat not found")
         
         await db_service.delete_session(session_id, user_id)
-        
         return {"status": "ok"}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error deleting chat {session_id} for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to delete chat session. Please try again later."
-        )
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
+        raise HTTPException(status_code=500, detail="Failed to delete chat session.")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=80)
-    
+    uvicorn.run(app, host="127.0.0.1", port=8000)

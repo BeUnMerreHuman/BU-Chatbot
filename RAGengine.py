@@ -34,7 +34,6 @@ class RuleSearchEngine:
             model_name=MODEL_NAME, 
             cache_dir=cache_path
         )
-        self.embedding_model = TextEmbedding(model_name=MODEL_NAME)
 
         if self.verbose: print("Initializing Groq...")
         self.llm = ChatGroq(
@@ -119,14 +118,20 @@ class RuleSearchEngine:
             "chat_history": chat_history,
             "input": user_input
         })
-
-    async def generate_answer(self, user_query: str, documents: list, chat_history: list):
     
+    async def ask_stream(self, user_input: str, chat_history: list = None):
+        """Streams the RAG response chunk by chunk."""
+        if chat_history is None:
+            chat_history = []
+        
+        standalone_query = await self.contextualize_query(user_input, chat_history)
+        docs = await self.search(standalone_query)
+        
         context_text = ""
-        if not documents:
+        if not docs:
             context_text = "No specific rules found in the database."
         else:    
-            for doc in documents:
+            for doc in docs:
                 meta = doc.get('metadata', {})
                 rule = meta.get('rule_number', 'N/A')
                 page = meta.get('page_number', 'N/A')
@@ -134,12 +139,10 @@ class RuleSearchEngine:
                 context_text += f"[Source: Rule {rule}, Page {page}]: {content}\n\n"
         
         qa_system_prompt = (
-            "You are an assistant for question-answering tasks. "
-            "Use the following pieces of retrieved context to answer "
-            "the question. If you don't know the answer, say that you "
-            "don't know. Dont answer questions that are not related to the context. Always use the provided context to answer and do not rely on any prior knowledge."
-            "ALWAYS cite the specific Rule Number or Page Number associated "
-            "with the information in your answer.\n\n"
+            "You are an Bahria University assistant chatbot for question-answering tasks. "
+            "Use the following pieces of retrieved context to answer the question. "
+            "If you don't know the answer, say that you don't know. "
+            "ALWAYS cite the specific Rule Number or Page Number associated with the information.\n\n"
             "CONTEXT:\n{context}"
         )
 
@@ -149,33 +152,27 @@ class RuleSearchEngine:
             ("human", "{input}"),
         ])
 
+        # Using standard StrOutputParser for simple text streaming
         chain = prompt | self.llm | StrOutputParser()
 
-        response = await chain.ainvoke({
+        # Stream the response asynchronously
+        async for chunk in chain.astream({
             "chat_history": chat_history,
             "context": context_text,
-            "input": user_query
-        })
-
-        return response, context_text
-
-    async def ask(self, user_input: str, chat_history: list = None):
-      
-        if chat_history is None:
-            chat_history = []
-        
-        standalone_query = await self.contextualize_query(user_input, chat_history)
-        docs = await self.search(standalone_query)
-        answer, _ = await self.generate_answer(user_input, docs, chat_history)
-        
-        return answer
+            "input": user_input
+        }):
+            yield chunk
     
     async def generate_chat_title(self, first_message: str):
         title_system_prompt = (
-            "You are a helpful assistant. Generate a very short, concise "
-            "title (maximum 5 words) for a chat session that starts with "
-            "the following message. Do not use quotes or markdown."
-        )
+            "You are the chat title generator for Bahria University's (BU) internal chatbot. "
+            "Your sole task is to generate a short, concise title (maximum 5 words) for a chat session based on the user's first message.\n\n"
+            "STRICT RULES:\n"
+            "1. The title must be 5 words or less.\n"
+            "2. Do NOT answer or resolve the user's question in the title.\n"
+            "3. Keep it strictly as a topic summary (e.g., 'Bahria Admission Process' or 'Karachi Inquiry').\n"
+            "4. Do NOT include quotes, markdown, or punctuation."
+    )
         prompt = ChatPromptTemplate.from_messages([
              ("system", title_system_prompt),
              ("human", "{input}")

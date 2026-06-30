@@ -4,7 +4,7 @@ An intelligent, RAG-powered (Retrieval-Augmented Generation) chatbot designed to
 
 ---
 
-## 🚀 Overview
+## Overview
 
 The BU Chatbot transforms a static PDF rulebook into an interactive AI assistant. It uses a hybrid search approach (Regex + Vector Search) to provide accurate answers based on the official university guidelines.
 
@@ -18,7 +18,7 @@ The BU Chatbot transforms a static PDF rulebook into an interactive AI assistant
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 * **Backend:** FastAPI (Python)
 * **LLM:** Groq (Llama 3.1 8B)
@@ -29,7 +29,7 @@ The BU Chatbot transforms a static PDF rulebook into an interactive AI assistant
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
 1. **Python 3.9+**
 2. **MongoDB Atlas Account:** Create a cluster and obtain your connection string.
@@ -38,7 +38,7 @@ The BU Chatbot transforms a static PDF rulebook into an interactive AI assistant
 
 ---
 
-## ⚙️ Installation & Setup
+## Installation & Setup
 
 ### 1. Clone the Repository
 
@@ -51,7 +51,7 @@ cd BU-Chatbot
 ### 2. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+uv sync
 
 ```
 
@@ -95,24 +95,24 @@ python AddData.py
 
 ---
 
-## 🏃 Running the Application
+## Running the Application
 
 Start the FastAPI server:
 
 ```bash
-python -m uvicorn main:app
+uv run main.py
 
 ```
 
-The application will be available at `http://localhost:8000`.
+he backend runs at `http://127.0.0.1:8000`, while the frontend is served from `http://localhost:8501`. This cross-origin setup is intentional and is used to test the backend's CORS configuration.
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 * `main.py`: The FastAPI application entry point and API endpoints.
 * `RAGengine.py`: Logic for query contextualization, document retrieval, and LLM answer generation.
 * `database.py`: Handles all MongoDB interactions using the Bucketing Pattern for chat history.
 * `AddData.py`: Data ingestion pipeline (Kaggle -> Vector Store).
-* `static/`: Contains the frontend assets (`index.html`, `script.js`, `style.css`).
+* `chatbot-ui/`: Contains the react based frontend assets.
 * `requirements.txt`: List of Python dependencies.
