@@ -71,8 +71,6 @@ VECTOR_COLLECTION_NAME=rules
 GROQ_API_KEY=your_groq_api_key
 
 # Clerk Authentication
-CLERK_PUBLISHABLE_KEY=pk_test_...
-CLERK_SECRET_KEY=sk_test_...
 CLERK_ISSUER=https://your-issuer-url
 CLERK_JWKS_URL=https://api.clerk.com/v1/jwks
 

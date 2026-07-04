@@ -1,10 +1,71 @@
-/* Hide scrollbar for Chrome, Safari and Opera */
-::-webkit-scrollbar {
-  display: none;
+/* Define the colors for Light Mode (Surface Ocean) */
+:root {
+  --ocean-top: #00a8ff;
+  --ocean-mid: #005a96;
+  --ocean-deep: #001224;
 }
 
-/* Hide scrollbar for IE, Edge and Firefox */
-* {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: none;  /* Firefox */
+/* Define the colors for Dark Mode (Deep Ocean) */
+.dark {
+  --ocean-top: #003a70;
+  --ocean-mid: #001f3f;
+  --ocean-deep: #000814;
+}
+
+/* Deep, realistic ocean background with sunlight breaking from above */
+.ocean-bg {
+  position: relative;
+  /* Uses the dynamic variables based on the active theme */
+  background: radial-gradient(circle at 50% -10%, var(--ocean-top) 0%, var(--ocean-mid) 40%, var(--ocean-deep) 100%);
+  overflow: hidden;
+  transition: background 0.5s ease-in-out; /* Smooth fade when toggling */
+}
+
+/* Simulated light rays penetrating the water */
+.ocean-bg::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: 
+    repeating-linear-gradient(
+      105deg,
+      transparent,
+      transparent 3%,
+      rgba(255, 255, 255, 0.04) 3%,
+      rgba(255, 255, 255, 0.04) 5%
+    ),
+    repeating-linear-gradient(
+      75deg,
+      transparent,
+      transparent 4%,
+      rgba(255, 255, 255, 0.03) 4%,
+      rgba(255, 255, 255, 0.03) 7%
+    );
+  mix-blend-mode: overlay;
+  /* Swaying motion to simulate water currents */
+  animation: sway-rays 12s ease-in-out infinite alternate;
+}
+
+/* Soft ambient light pulse to make the water feel alive */
+.ocean-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 20%, rgba(255, 255, 255, 0.15), transparent 60%);
+  animation: pulse-water 8s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+/* Animations for the realistic moving feel */
+@keyframes sway-rays {
+  0% { transform: scale(1) translateX(-2%) translateY(-2%) rotate(0deg); }
+  100% { transform: scale(1.05) translateX(2%) translateY(2%) rotate(3deg); }
+}
+
+@keyframes pulse-water {
+  0% { opacity: 0.6; transform: scale(1); }
+  100% { opacity: 1; transform: scale(1.1); }
 }

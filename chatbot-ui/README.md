@@ -52,7 +52,18 @@ npm install
 
 Ensure the RAG backend is running and update any required API or WebSocket endpoints if necessary.
 
-### 4. Start the development server
+
+### 4. Configure Environment Variables
+
+Create a `.env` file in the chatbot-ui directory and populate it with your credential:
+
+```env
+# Clerk Authentication
+VITE_CLERK_PUBLISHABLE_KEY=pk_test_....
+```
+
+
+### 5. Start the development server
 
 ```bash
 npm run dev
