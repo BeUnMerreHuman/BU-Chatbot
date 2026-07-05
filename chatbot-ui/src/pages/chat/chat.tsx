@@ -111,7 +111,9 @@ export function Chat() {
         socketRef.current.close();
       }
 
-      let wsUrl = `ws://127.0.0.1:8000/ws/chat?token=${token}`;
+      const wsProtocol = API_URL.startsWith('https') ? 'wss' : 'ws';
+      const wsBaseUrl = API_URL.replace(/^https?:\/\//, '');
+      let wsUrl = `${wsProtocol}://${wsBaseUrl}/ws/chat?token=${token}`;
       if (currentSessionId) {
         wsUrl += `&session_id=${currentSessionId}`;
       }
@@ -129,6 +131,14 @@ export function Chat() {
 
       socket.onmessage = (event) => {
         setIsLoading(false);
+        
+        if (event.data.startsWith("[SESSION_ID:")) {
+            const newSessionId = event.data.replace("[SESSION_ID:", "").replace("]", "");
+            setCurrentSessionId(newSessionId);
+            window.history.replaceState({}, '', `?session=${newSessionId}`);
+            return; 
+        }
+
         if(event.data.includes("[END]")) {
             socket.close();
             setRefreshSidebarTrigger(prev => prev + 1);

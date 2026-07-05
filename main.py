@@ -190,6 +190,7 @@ async def websocket_chat(websocket: WebSocket, token: str = Query(...), session_
                     title = user_message[:30] + "..."
                     
                 await db_service.create_session(current_session, title, user_id)
+                await websocket.send_text(f"[SESSION_ID:{current_session}]")
             elif session_data.get("title") == "New Chat":
                 try:
                     new_title = await engine.generate_chat_title(user_message)
@@ -311,4 +312,6 @@ async def delete_chat(session_id: str, user_id: str = Depends(get_current_user_i
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
